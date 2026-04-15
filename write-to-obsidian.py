@@ -17,7 +17,7 @@ from datetime import datetime
 
 
 VAULT = os.environ.get('OBSIDIAN_VAULT_PATH', 
-                       os.path.expanduser('~/Documents/Obsidian Vault'))
+                       os.path.expanduser('~/Documents/我的知识库'))
 
 CATEGORY_MAP = {
     'tech': '技术',
