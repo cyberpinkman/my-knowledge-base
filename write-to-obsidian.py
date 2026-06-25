@@ -78,6 +78,30 @@ def choose_note_path(folder, safe_title, url, date_str):
         counter += 1
 
 
+def yaml_quote(value):
+    """Return a YAML-safe JSON scalar."""
+    return json.dumps('' if value is None else str(value), ensure_ascii=False)
+
+
+def parse_tags(tags):
+    if isinstance(tags, (list, tuple)):
+        return [str(t).strip() for t in tags if str(t).strip()]
+    text = str(tags or '').strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [str(t).strip() for t in parsed if str(t).strip()]
+    except json.JSONDecodeError:
+        pass
+    return [t.strip() for t in text.split(',') if t.strip()]
+
+
+def format_tags_yaml(tags):
+    return '[' + ', '.join(yaml_quote(tag) for tag in tags) + ']'
+
+
 def write_note(title, url, source_type, author='', category='',
                tags='', summary='', content='', key_points=''):
     """Write a note to Obsidian vault."""
@@ -98,18 +122,17 @@ def write_note(title, url, source_type, author='', category='',
     safe_title = sanitize_filename(title)
     filepath = choose_note_path(folder, safe_title, url, date_str)
     
-    # Format tags
-    tag_list = [t.strip() for t in tags.split(',') if t.strip()]
-    tags_str = ', '.join(tag_list)
+    tag_list = parse_tags(tags)
+    tags_yaml = format_tags_yaml(tag_list)
     
     # Build note content
     note = f"""---
-title: "{title}"
-source: "{url}"
-source_type: "{source_type}"
-author: "{author}"
-category: "{category}"
-tags: [{tags_str}]
+title: {yaml_quote(title)}
+source: {yaml_quote(url)}
+source_type: {yaml_quote(source_type)}
+author: {yaml_quote(author)}
+category: {yaml_quote(category)}
+tags: {tags_yaml}
 date: {date_str}
 status: unread
 ---

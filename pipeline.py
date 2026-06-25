@@ -134,7 +134,7 @@ def process_article(
 
         did_sync = False
         if sync_gbrain:
-            did_sync = sync_article_to_gbrain(db_path)
+            did_sync = sync_article_to_gbrain(db_path, article_id)
 
         return ProcessResult(
             True,
@@ -205,39 +205,63 @@ def fetch_pdf_content(url: str) -> FetchResult:
 def fetch_web_content(url: str) -> FetchResult:
     screenshot_path = tempfile.NamedTemporaryFile(prefix="read-later-page-", suffix=".png", delete=False)
     screenshot_path.close()
-    completed = subprocess.run(
-        ["node", str(WORKSPACE / "fetch-screenshot.js"), url, screenshot_path.name],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=90,
-        check=False,
-    )
+    screenshot_file = screenshot_path.name
+    keep_screenshot = os.environ.get("READ_LATER_KEEP_SCREENSHOTS") == "1"
+    argv = ["node", str(WORKSPACE / "fetch-screenshot.js"), url, screenshot_file]
+    try:
+        completed = subprocess.run(
+            argv,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=90,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return FetchResult(url=url, source="web", error=subprocess_error_message(argv, exc))
+    finally:
+        if not keep_screenshot:
+            remove_file_if_exists(screenshot_file)
     text = completed.stderr or completed.stdout
+    metadata = {"screenshot": screenshot_file} if keep_screenshot else None
     if completed.returncode != 0:
-        return FetchResult(url=url, source="web", error=(text or "web fetch failed").strip())
+        return FetchResult(
+            url=url,
+            source="web",
+            raw_metadata=metadata,
+            error=(text or "web fetch failed").strip(),
+        )
     title = extract_between(text, "---TITLE---", "---END TITLE---")
     content = extract_between(text, "---CONTENT---", "---END CONTENT---")
     if not content:
-        return FetchResult(title=title, url=url, source="web", error="empty web content")
+        return FetchResult(
+            title=title,
+            url=url,
+            source="web",
+            raw_metadata=metadata,
+            error="empty web content",
+        )
     return FetchResult(
         title=title,
         content=content,
         source="web",
         url=url,
-        raw_metadata={"screenshot": screenshot_path.name},
+        raw_metadata=metadata,
     )
 
 
 def run_json_command(argv: list[str], timeout: int) -> Mapping[str, object] | FetchResult:
-    completed = subprocess.run(
-        argv,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            argv,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return FetchResult(error=subprocess_error_message(argv, exc))
     if completed.returncode != 0:
         error = (completed.stderr or completed.stdout or f"command failed: {' '.join(argv)}").strip()
         return FetchResult(error=error)
@@ -245,6 +269,20 @@ def run_json_command(argv: list[str], timeout: int) -> Mapping[str, object] | Fe
         return json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
         return FetchResult(error=f"invalid JSON from {' '.join(argv)}: {exc}")
+
+
+def subprocess_error_message(argv: list[str], exc: BaseException) -> str:
+    command = " ".join(shlex.quote(str(part)) for part in argv)
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"command timed out after {exc.timeout}s: {command}"
+    return f"command failed to start: {command}: {exc}"
+
+
+def remove_file_if_exists(path: str) -> None:
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def fetch_result_from_video_payload(url: str, payload: Mapping[str, object]) -> FetchResult:
@@ -364,8 +402,10 @@ def analysis_input(title: str, content: str, source_type: str, raw_metadata: Map
             "summary": "150-300 Chinese characters, explain the real idea instead of copying platform summaries",
             "category": "one of tech,business,design,life,news,other",
             "tags": "3-8 short Chinese tags",
-            "key_points": "Markdown bullet list of the most important points",
-            "note_content": "Markdown deep-learning note for Obsidian",
+            "source_facts": "3-8 bullet strings grounded only in provided content/raw_metadata; no external claims",
+            "inferences": "3-8 bullet strings of reasoning clearly derived from source_facts",
+            "external_context": "optional external background; mark it as unverified or return []",
+            "claims_to_verify": "claims/questions that require checking original sources or outside evidence",
         },
     }
 
@@ -417,8 +457,8 @@ def analyze_with_openai(
                 "role": "system",
                 "content": (
                     "你是个人知识库的深度阅读助理。任务是把抓取到的原始材料转成可学习、"
-                    "可复用的 Obsidian 笔记。不要盲信平台自动摘要；如果材料明显很短或可能偏题，"
-                    "要在 note_content 里说明局限。只输出 JSON。"
+                    "可复用的结构化知识。不要盲信平台自动摘要；必须把原文事实、模型推断、"
+                    "外部背景和待查证事项分开。外部背景不得冒充原文事实。只输出 JSON。"
                 ),
             },
             {
@@ -466,8 +506,8 @@ def analyze_with_minimax(
                 "role": "system",
                 "content": (
                     "你是个人知识库的深度阅读助理。把抓取到的原始材料转成可学习、"
-                    "可复用的 Obsidian 笔记。不要盲信平台自动摘要；如果材料明显很短、偏题或证据不足，"
-                    "必须在 note_content 里说明局限。"
+                    "可复用的结构化知识。不要盲信平台自动摘要；必须把原文事实、模型推断、"
+                    "外部背景和待查证事项分开。外部背景不得冒充原文事实。"
                 ),
             },
             {
@@ -524,13 +564,25 @@ def resolve_minimax_api_key() -> tuple[str, str]:
 def analysis_json_schema() -> dict[str, object]:
     return {
         "type": "object",
-        "required": ["summary", "category", "tags", "key_points", "note_content"],
+        "required": [
+            "summary",
+            "category",
+            "tags",
+            "source_facts",
+            "inferences",
+            "external_context",
+            "claims_to_verify",
+        ],
         "properties": {
             "summary": {"type": "string"},
             "category": {"type": "string", "enum": ["tech", "business", "design", "life", "news", "other"]},
             "tags": {"type": "array", "items": {"type": "string"}},
             "key_points": {"type": "string"},
             "note_content": {"type": "string"},
+            "source_facts": {"type": "array", "items": {"type": "string"}},
+            "inferences": {"type": "array", "items": {"type": "string"}},
+            "external_context": {"type": "array", "items": {"type": "string"}},
+            "claims_to_verify": {"type": "array", "items": {"type": "string"}},
         },
         "additionalProperties": False,
     }
@@ -642,12 +694,25 @@ def analysis_result_from_payload(payload: Mapping[str, object], source: str) -> 
     if isinstance(raw_tags, str):
         raw_tags = [part.strip() for part in re.split(r"[,，、]", raw_tags) if part.strip()]
     tags = [str(tag).strip().strip("#") for tag in raw_tags if str(tag).strip()]
+    source_facts = list_from_payload(payload.get("source_facts"))
+    inferences = list_from_payload(payload.get("inferences"))
+    external_context = list_from_payload(payload.get("external_context"))
+    claims_to_verify = list_from_payload(payload.get("claims_to_verify"))
+    structured_note = build_structured_note_content(
+        source_facts,
+        inferences,
+        external_context,
+        claims_to_verify,
+    )
+    key_points = str(payload.get("key_points", "") or "").strip()
+    if not key_points and (source_facts or inferences):
+        key_points = markdown_bullets([*source_facts, *inferences])
     return AnalysisResult(
         summary=_clean(payload.get("summary", "")),
         category=_clean(payload.get("category", "")),
         tags=tags,
-        key_points=str(payload.get("key_points", "") or "").strip(),
-        note_content=str(payload.get("note_content", "") or "").strip(),
+        key_points=key_points,
+        note_content=structured_note or str(payload.get("note_content", "") or "").strip(),
         source=source,
     )
 
@@ -670,6 +735,43 @@ def normalize_analysis_result(
         note_content=result.note_content or fallback.note_content,
         source=result.source,
     )
+
+
+def list_from_payload(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        lines = []
+        for line in value.splitlines():
+            cleaned = re.sub(r"^\s*[-*]\s+", "", line).strip()
+            if cleaned:
+                lines.append(cleaned)
+        return lines or [value.strip()]
+    return []
+
+
+def markdown_bullets(items: list[str]) -> str:
+    return "\n".join(f"- {item}" for item in items if item.strip())
+
+
+def build_structured_note_content(
+    source_facts: list[str],
+    inferences: list[str],
+    external_context: list[str],
+    claims_to_verify: list[str],
+) -> str:
+    if not any((source_facts, inferences, external_context, claims_to_verify)):
+        return ""
+    sections = [
+        ("## 原文事实", source_facts or ["抓取材料不足，无法提取可靠原文事实。"]),
+        ("## 模型推断", inferences or ["无。"]),
+        ("## 外部背景（待查证）", external_context or ["无。"]),
+        ("## 待查证", claims_to_verify or ["无。"]),
+    ]
+    parts = []
+    for heading, items in sections:
+        parts.extend([heading, "", markdown_bullets(items), ""])
+    return "\n".join(parts).strip()
 
 
 def make_summary(content: str, limit: int = 500) -> str:
@@ -843,17 +945,22 @@ def write_obsidian_note(
         source_type=source_type,
         author=author,
         category=category,
-        tags=",".join(tags),
+        tags=json.dumps(tags, ensure_ascii=False),
         summary=summary,
         content=content,
         key_points=key_points,
     )
 
 
-def sync_article_to_gbrain(db_path: Path | str) -> bool:
+def sync_article_to_gbrain(db_path: Path | str, article_id: int) -> bool:
     import sync_to_gbrain
 
-    result = sync_to_gbrain.sync_articles(db_path=db_path, limit=1, verbose=False)
+    result = sync_to_gbrain.sync_articles(
+        db_path=db_path,
+        article_id=article_id,
+        limit=1,
+        verbose=False,
+    )
     return result.synced > 0
 
 

@@ -1,16 +1,19 @@
 # My Knowledge Base | 我的知识库
 
-AI 驱动的个人知识管理系统：自动收录链接/图片/文档，记录灵感，构建知识关联。
+AI 驱动的个人知识管理系统：收录链接、视频和 PDF，抓取内容后用 LLM 做结构化分析，写入 Obsidian，并把长期价值内容同步到 gbrain。
 
 ## 功能
 
-- **链接收录** — 发送 URL 自动抓取、总结、分类存入知识库
-  - 微信公众号、普通网页（Playwright 抓取）
-  - YouTube、B站、抖音（字幕提取 + 视频截帧）
-  - Twitter/X、小红书
+- **内容收录** — 通过 `process.sh` 收录 URL 或本地 PDF，抓取、分析、分类并写入知识库
+  - 普通网页、微信公众号等网页：Playwright 抓取正文
+  - YouTube、B站、抖音：优先提取字幕/转录/平台元数据
+  - 本地 PDF 或 PDF URL：提取文本后分析
+  - Twitter/X、小红书等强反爬平台：目前走通用网页抓取，可能失败或需要人工补充内容
 - **灵感管理** — 随手记录 idea，自动搜索知识库关联内容，评估可行性
 - **知识关联** — 构建 idea ↔ 知识的双向链接
 - **Obsidian 集成** — 所有内容以 Markdown 写入 Obsidian Vault
+
+当前不支持图片内容解析；图片/OCR 是后续扩展方向。
 
 ## 架构
 
@@ -19,9 +22,9 @@ AI 驱动的个人知识管理系统：自动收录链接/图片/文档，记录
   ↓
 process.sh → 检测类型、收录数据库
   ↓
-fetch-video.py / fetch-screenshot.js → 抓取内容
+fetch-video.py / fetch-pdf.py / fetch-screenshot.js → 抓取内容
   ↓
-AI 生成摘要 + 分类 + 标签
+LLM 结构化分析：摘要 / 原文事实 / 模型推断 / 外部背景 / 待查证
   ↓
 write-to-obsidian.py → 写入 Obsidian Vault
 sync_to_gbrain.py → 筛选高价值条目并同步到 gbrain
@@ -52,9 +55,48 @@ npm install playwright
 
 ## 使用
 
+### 配置 LLM
+
+默认优先级：
+
+1. `READ_LATER_LLM_COMMAND`
+2. MiniMax：`READ_LATER_LLM_PROVIDER=minimax` 或检测到 MiniMax key
+3. OpenAI：检测到 `OPENAI_API_KEY`
+4. 无可用 LLM 时回退到本地规则摘要
+
+MiniMax 示例：
+
+```bash
+export READ_LATER_LLM_PROVIDER=minimax
+export MINIMAX_CN_API_KEY="your_minimax_key_here"
+```
+
+不要把真实 API key 写进 README、提交到 git，或放进公开日志。这里的 `your_minimax_key_here` 只是占位符。
+
+常用环境变量：
+
+```bash
+export OBSIDIAN_VAULT_PATH="$HOME/Documents/我的知识库"
+export READ_LATER_FORCE=1              # 已处理条目也重新抓取/分析
+export READ_LATER_INBOX_ONLY=1         # 只收录，不立即处理
+export READ_LATER_SYNC_GBRAIN=1        # 当前条目处理后尝试同步到 gbrain
+export READ_LATER_KEEP_SCREENSHOTS=1   # 调试网页抓取时保留临时截图；默认会删除
+export READ_LATER_LLM_TIMEOUT=120
+export READ_LATER_LLM_MAX_OUTPUT_TOKENS=2200
+```
+
+可选 MiniMax 变量：
+
+```bash
+export READ_LATER_MINIMAX_MODEL="MiniMax-M3"
+export READ_LATER_MINIMAX_BASE_URL="https://api.minimaxi.com/v1"
+export READ_LATER_MINIMAX_API_KEY_ENV="MINIMAX_CN_API_KEY"
+```
+
 ### 收录链接
 ```bash
 ./process.sh "https://example.com/article"
+./process.sh ~/Downloads/paper.pdf
 python3 fetch-video.py "https://youtube.com/watch?v=xxx" /tmp/output
 ```
 
@@ -73,6 +115,9 @@ python3 sync_to_gbrain.py --dry-run
 
 # 默认只同步 tech,business,design 中已有摘要且未同步的条目
 python3 sync_to_gbrain.py
+
+# 精确同步某一条 articles.id
+python3 sync_to_gbrain.py --article-id 67
 
 # 人工标记长期价值内容，只同步标记过的条目
 python3 mark.py value 12 18 23

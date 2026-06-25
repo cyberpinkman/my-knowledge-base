@@ -81,6 +81,7 @@ def select_eligible_articles(
     limit: int | None = None,
     retry_failed: bool = False,
     only_marked: bool = False,
+    article_id: int | None = None,
 ) -> list[sqlite3.Row]:
     category_values = tuple(c.strip() for c in categories if c.strip())
     if not category_values and not only_marked:
@@ -97,6 +98,9 @@ def select_eligible_articles(
         status_filter,
     ]
     params: list[object] = []
+    if article_id is not None:
+        filters.append("id = ?")
+        params.append(int(article_id))
     if only_marked:
         filters.append("long_term_value = 1")
     else:
@@ -235,11 +239,19 @@ def sync_articles(
     gbrain_command: str = "gbrain",
     command_runner: Callable[[list[str], str], CommandResult] = default_command_runner,
     verbose: bool = True,
+    article_id: int | None = None,
 ) -> SyncResult:
     conn = open_db(db_path)
     try:
         ensure_schema(conn)
-        articles = select_eligible_articles(conn, categories, limit, retry_failed, only_marked)
+        articles = select_eligible_articles(
+            conn,
+            categories,
+            limit,
+            retry_failed,
+            only_marked,
+            article_id=article_id,
+        )
         synced = failed = skipped = 0
         for article in articles:
             slug = make_slug(article)
@@ -282,6 +294,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Show planned writes without calling gbrain")
     parser.add_argument("--retry-failed", action="store_true", help="Retry articles previously marked failed")
     parser.add_argument("--only-marked", action="store_true", help="Only sync articles marked as long-term value")
+    parser.add_argument("--article-id", type=int, default=None, help="Sync one specific articles.id if eligible")
     parser.add_argument("--gbrain-command", default="gbrain", help="gbrain executable path")
     args = parser.parse_args(argv)
 
@@ -292,6 +305,7 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
         retry_failed=args.retry_failed,
         only_marked=args.only_marked,
+        article_id=args.article_id,
         gbrain_command=args.gbrain_command,
     )
     print(

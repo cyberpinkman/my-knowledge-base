@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -358,6 +359,145 @@ class ReadLaterPipelineTest(unittest.TestCase):
         self.assertEqual(seen["payload"]["thinking"], {"type": "disabled"})
         self.assertTrue(seen["payload"]["reasoning_split"])
         self.assertIn("Authorization", seen["headers"])
+
+    def test_sync_article_to_gbrain_passes_current_article_id(self):
+        class Result:
+            synced = 1
+
+        with patch("sync_to_gbrain.sync_articles", return_value=Result()) as sync_articles:
+            did_sync = pipeline.sync_article_to_gbrain(Path("/tmp/articles.db"), 42)
+
+        self.assertTrue(did_sync)
+        sync_articles.assert_called_once_with(
+            db_path=Path("/tmp/articles.db"),
+            article_id=42,
+            limit=1,
+            verbose=False,
+        )
+
+    def test_run_json_command_returns_fetch_result_on_timeout(self):
+        with patch(
+            "pipeline.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd=["node", "fetch.js"], timeout=3),
+        ):
+            result = pipeline.run_json_command(["node", "fetch.js"], timeout=3)
+
+        self.assertIsInstance(result, pipeline.FetchResult)
+        self.assertIn("timed out", result.error)
+        self.assertIn("node fetch.js", result.error)
+
+    def test_fetch_web_content_returns_fetch_result_on_os_error(self):
+        with patch("pipeline.subprocess.run", side_effect=OSError("node missing")):
+            result = pipeline.fetch_web_content("https://example.com/article")
+
+        self.assertEqual(result.source, "web")
+        self.assertEqual(result.url, "https://example.com/article")
+        self.assertIn("node missing", result.error)
+
+    def test_fetch_web_content_removes_temp_screenshot_unless_debug_retention_enabled(self):
+        old_keep = os.environ.pop("READ_LATER_KEEP_SCREENSHOTS", None)
+        self.addCleanup(lambda: _restore_env("READ_LATER_KEEP_SCREENSHOTS", old_keep))
+        seen_paths = []
+
+        def fake_run(argv, **kwargs):
+            screenshot = Path(argv[3])
+            screenshot.write_text("fake screenshot", encoding="utf-8")
+            seen_paths.append(screenshot)
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="",
+                stderr=(
+                    "---TITLE---\nTitle\n---END TITLE---\n"
+                    "---CONTENT---\nBody text\n---END CONTENT---\n"
+                ),
+            )
+
+        with patch("pipeline.subprocess.run", fake_run):
+            result = pipeline.fetch_web_content("https://example.com/article")
+
+        self.assertEqual(result.content, "Body text")
+        self.assertNotIn("screenshot", result.raw_metadata or {})
+        self.assertFalse(seen_paths[0].exists())
+
+        os.environ["READ_LATER_KEEP_SCREENSHOTS"] = "1"
+        with patch("pipeline.subprocess.run", fake_run):
+            retained = pipeline.fetch_web_content("https://example.com/article")
+
+        retained_path = Path(retained.raw_metadata["screenshot"])
+        self.assertTrue(retained_path.exists())
+        self.addCleanup(lambda: retained_path.exists() and retained_path.unlink())
+
+    def test_analysis_payload_builds_note_with_fact_boundaries(self):
+        required = set(pipeline.analysis_json_schema()["required"])
+        self.assertTrue(
+            {
+                "source_facts",
+                "inferences",
+                "external_context",
+                "claims_to_verify",
+            }.issubset(required)
+        )
+
+        result = pipeline.analysis_result_from_payload(
+            {
+                "summary": "这是一条结构化深度摘要。",
+                "category": "tech",
+                "tags": ["AI", "就业"],
+                "source_facts": ["原文提到 AI 会造成三组脱钩。"],
+                "inferences": ["普通人应优先选择需要承担责任的岗位。"],
+                "external_context": ["AI 税与企业披露义务需要另行查证。"],
+                "claims_to_verify": ["三组脱钩是否有原始研究或数据支撑？"],
+            },
+            source="minimax",
+        )
+
+        self.assertIn("## 原文事实", result.note_content)
+        self.assertIn("原文提到 AI 会造成三组脱钩。", result.note_content)
+        self.assertIn("## 模型推断", result.note_content)
+        self.assertIn("## 外部背景（待查证）", result.note_content)
+        self.assertIn("## 待查证", result.note_content)
+
+    def test_obsidian_frontmatter_escapes_yaml_values(self):
+        tmp, db_path, conn = make_db()
+        self.addCleanup(tmp.cleanup)
+        vault = Path(tmp.name) / "vault"
+        conn.execute(
+            "INSERT INTO articles (url, source_type) VALUES (?, ?)",
+            ("https://example.com/yaml", "web"),
+        )
+        conn.commit()
+        article_id = conn.execute("SELECT id FROM articles").fetchone()["id"]
+
+        def fetcher(article):
+            return pipeline.FetchResult(
+                title='Agent "Quoted": Test',
+                content="content about AI agents",
+                source="fixture",
+            )
+
+        def analyzer(title, content, source_type, raw_metadata):
+            return pipeline.AnalysisResult(
+                summary="summary",
+                category="tech",
+                tags=["AI,Agent", "风险:测试"],
+                key_points="- point",
+                note_content="body",
+            )
+
+        result = pipeline.process_article(
+            article_id,
+            db_path=db_path,
+            vault_path=vault,
+            fetcher=fetcher,
+            analyzer=analyzer,
+            sync_gbrain=False,
+        )
+
+        self.assertTrue(result.ok)
+        note = next(vault.rglob("*.md")).read_text()
+        self.assertIn('title: "Agent \\"Quoted\\": Test"', note)
+        self.assertIn('tags: ["AI,Agent", "风险:测试"]', note)
 
     def test_douyin_page_payload_becomes_fetch_result(self):
         payload = {

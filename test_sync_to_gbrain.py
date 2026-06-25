@@ -169,6 +169,63 @@ class SyncToGbrainTest(unittest.TestCase):
         self.assertEqual(row[1], "synced")
         self.assertIsNone(row[2])
 
+    def test_sync_articles_can_target_one_article_even_when_older_articles_are_eligible(self):
+        tmp, db_path, conn = make_db()
+        self.addCleanup(tmp.cleanup)
+        sync_to_gbrain.ensure_schema(conn)
+        conn.executemany(
+            """
+            INSERT INTO articles (
+              id, url, source_type, title, original_content, summary, category, tags, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    1,
+                    "https://example.com/old",
+                    "web",
+                    "Old Article",
+                    "Old body.",
+                    "Old summary.",
+                    "tech",
+                    "[]",
+                    "2026-01-01 00:00:00",
+                ),
+                (
+                    2,
+                    "https://example.com/current",
+                    "web",
+                    "Current Article",
+                    "Current body.",
+                    "Current summary.",
+                    "tech",
+                    "[]",
+                    "2026-06-25 00:00:00",
+                ),
+            ],
+        )
+        conn.commit()
+        calls = []
+
+        def runner(argv, input_text):
+            calls.append((argv, input_text))
+            return sync_to_gbrain.CommandResult(returncode=0, stdout="", stderr="")
+
+        result = sync_to_gbrain.sync_articles(
+            db_path=db_path,
+            article_id=2,
+            command_runner=runner,
+            verbose=False,
+        )
+
+        self.assertEqual(result.synced, 1)
+        self.assertEqual(calls[0][0][2], "media/articles/web-2-759fe5ed")
+        rows = conn.execute(
+            "SELECT id, gbrain_sync_status FROM articles ORDER BY id"
+        ).fetchall()
+        self.assertEqual([(row["id"], row["gbrain_sync_status"]) for row in rows], [(1, None), (2, "synced")])
+
 
 if __name__ == "__main__":
     unittest.main()
