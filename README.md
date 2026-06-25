@@ -24,6 +24,7 @@ fetch-video.py / fetch-screenshot.js → 抓取内容
 AI 生成摘要 + 分类 + 标签
   ↓
 write-to-obsidian.py → 写入 Obsidian Vault
+sync_to_gbrain.py → 筛选高价值条目并同步到 gbrain
 idea.py → 创建灵感 / 分析关联
   ↓
 Obsidian Vault (~/Documents/我的知识库/)
@@ -65,12 +66,31 @@ python3 write-to-obsidian.py \
   --tags "AI,Python" --summary "摘要内容"
 ```
 
+### 同步到 gbrain
+```bash
+# 预览将同步哪些条目
+python3 sync_to_gbrain.py --dry-run
+
+# 默认只同步 tech,business,design 中已有摘要且未同步的条目
+python3 sync_to_gbrain.py
+
+# 人工标记长期价值内容，只同步标记过的条目
+python3 mark.py value 12 18 23
+python3 sync_to_gbrain.py --only-marked --limit 10
+
+# 重试失败条目，或指定分类
+python3 sync_to_gbrain.py --retry-failed
+python3 sync_to_gbrain.py --categories tech,business,design,news
+```
+
 ### 灵感管理
 ```bash
 python3 idea.py add --title "我的idea" --description "描述"
 python3 idea.py list
 python3 idea.py analyze --title "我的idea"
 ```
+
+灵感关联会优先调用 `gbrain query` 检索长期脑库；如果 gbrain 不可用或没有结果，会自动回退到 Obsidian `稍后阅读/` 目录的本地关键词搜索。
 
 ## License
 

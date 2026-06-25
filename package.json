@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "fetch-screenshot.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "python3 -m unittest test_sync_to_gbrain.py test_idea_gbrain.py test_mark.py test_pipeline.py"
   },
   "keywords": [],
   "author": "",

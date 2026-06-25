@@ -147,20 +147,31 @@ def download_video(url, outdir):
 
 
 def download_video_playwright(url, outdir):
-    """Use Playwright to get video direct URL from Douyin pages."""
-    video_file = os.path.join(outdir, 'video.mp4')
+    """Legacy hook for direct video downloads.
+
+    fetch-douyin.js extracts page metadata as JSON; it does not download an mp4.
+    Keep this function as a no-op so callers do not mistake page scraping for
+    video download.
+    """
+    return None
+
+
+def fetch_douyin_page_json(url):
+    """Fetch Douyin page metadata via Playwright JSON scraper."""
+    if 'douyin.com' not in url and 'v.douyin.com' not in url:
+        return {}
     script = os.path.join(os.path.dirname(__file__), 'fetch-douyin.js')
     
     if not os.path.exists(script):
-        return None
+        return {}
     
     try:
-        r = run(['node', script, url, video_file], timeout=60)
-        if os.path.exists(video_file) and os.path.getsize(video_file) > 10000:
-            return video_file
+        r = run(['node', script, url], timeout=90)
+        if r.returncode == 0 and r.stdout.strip():
+            return json.loads(r.stdout)
     except Exception:
         pass
-    return None
+    return {}
 
 
 def extract_audio(video_file, outdir):
@@ -277,12 +288,31 @@ def main():
     print(f"[fetch-video] 作者: {author}", file=sys.stderr)
     print(f"[fetch-video] 时长: {duration}", file=sys.stderr)
     
-    # Step 2: Try subtitles first
     transcript = ''
+    frames_dir = ''
     source = 'none'
+    tags = []
+    published_date = ''
+
+    # Douyin short links often need fresh cookies for yt-dlp, but the page
+    # itself can expose reliable title/author/chapter summary.
+    douyin_page = fetch_douyin_page_json(url)
+    if douyin_page:
+        title = douyin_page.get('title') or title
+        author = douyin_page.get('author') or author
+        description = douyin_page.get('description') or description
+        duration = douyin_page.get('duration') or duration
+        tags = douyin_page.get('tags') or []
+        published_date = douyin_page.get('published_date') or ''
+        if douyin_page.get('chapter_summary'):
+            transcript = douyin_page['chapter_summary']
+            source = 'douyin_page'
+            print(f"[fetch-video] 抖音页面摘要获取成功 ({len(transcript)} 字符)", file=sys.stderr)
+
+    # Step 2: Try subtitles first
     
     video_id = get_video_id(url)
-    if video_id:
+    if not transcript and video_id:
         print("[fetch-video] 尝试 youtube-transcript-api...", file=sys.stderr)
         transcript = get_youtube_transcript(video_id)
         if transcript:
@@ -348,6 +378,8 @@ def main():
         'transcript': transcript,
         'frames_dir': frames_dir if source == 'frames' else '',
         'source': source,
+        'tags': tags,
+        'published_date': published_date,
     }
     
     print(json.dumps(result, ensure_ascii=False))

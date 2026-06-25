@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 
 
@@ -25,6 +26,25 @@ STATUS_MAP = {
     '进行中': '进行中',
     '已搁置': '已搁置',
 }
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def default_command_runner(argv):
+    completed = subprocess.run(
+        argv,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=45,
+    )
+    return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
 
 def sanitize_filename(name):
@@ -103,7 +123,36 @@ tags: [{tags_str}]
     return result
 
 
-def search_related_knowledge(query):
+def parse_gbrain_query_results(output):
+    """Extract unique gbrain slugs from `gbrain query` text output."""
+    slugs = []
+    seen = set()
+    for line in output.splitlines():
+        match = re.match(r'^\[[^\]]+\]\s+(\S+)\s+--\s+', line.strip())
+        if not match:
+            continue
+        slug = match.group(1)
+        if slug not in seen:
+            slugs.append(slug)
+            seen.add(slug)
+    return slugs
+
+
+def search_gbrain_related(query, command_runner=default_command_runner,
+                          gbrain_command='gbrain', limit=10):
+    """Search gbrain first; return slugs, or [] when unavailable/no match."""
+    if not query.strip():
+        return []
+    try:
+        result = command_runner([gbrain_command, 'query', query])
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    return parse_gbrain_query_results(result.stdout)[:limit]
+
+
+def search_vault_related_knowledge(query):
     """Search vault for related knowledge articles."""
     if not query.strip():
         return []
@@ -144,6 +193,81 @@ def search_related_knowledge(query):
     # Sort by relevance
     related.sort(key=lambda x: x[1], reverse=True)
     return [r[0] for r in related[:10]]
+
+
+def search_related_knowledge(query, command_runner=default_command_runner,
+                             prefer_gbrain=True):
+    """Search gbrain first, then fall back to local vault keyword matching."""
+    if prefer_gbrain:
+        gbrain_results = search_gbrain_related(query, command_runner=command_runner)
+        if gbrain_results:
+            return gbrain_results
+    return search_vault_related_knowledge(query)
+
+
+def looks_like_gbrain_slug(value):
+    return '/' in value and not value.endswith('.md')
+
+
+def extract_summary_section(markdown):
+    """Extract either Chinese or English summary section from markdown."""
+    summary = ''
+    in_summary = False
+    for line in markdown.split('\n'):
+        stripped = line.strip()
+        if re.match(r'^##\s+(摘要|Summary)\s*$', stripped, re.IGNORECASE):
+            in_summary = True
+            continue
+        if in_summary and stripped.startswith('## '):
+            break
+        if in_summary and stripped:
+            summary += stripped + ' '
+    return summary.strip()
+
+
+def get_gbrain_page_summary(slug, command_runner=default_command_runner,
+                            gbrain_command='gbrain'):
+    try:
+        result = command_runner([gbrain_command, 'get', slug])
+    except Exception:
+        return ''
+    if result.returncode != 0:
+        return ''
+    return extract_summary_section(result.stdout)[:200]
+
+
+def build_related_details(related, command_runner=default_command_runner):
+    """Build summary details for related gbrain slugs or vault note titles."""
+    related_details = []
+    read_later_dir = os.path.join(VAULT, '稍后阅读')
+
+    for item in related[:5]:
+        if looks_like_gbrain_slug(item):
+            summary = get_gbrain_page_summary(item, command_runner=command_runner)
+            related_details.append({
+                'title': item,
+                'summary': summary,
+                'source': 'gbrain',
+            })
+            continue
+
+        if not os.path.exists(read_later_dir):
+            continue
+        for root, dirs, files in os.walk(read_later_dir):
+            for fname in files:
+                if fname.replace('.md', '') != item:
+                    continue
+                fpath = os.path.join(root, fname)
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    content = f.read(3000)
+                related_details.append({
+                    'title': item,
+                    'summary': extract_summary_section(content)[:200],
+                    'source': 'vault',
+                })
+                break
+
+    return related_details
 
 
 def list_ideas(status_filter=None):
@@ -202,7 +326,7 @@ def list_ideas(status_filter=None):
     return ideas
 
 
-def analyze_idea(title):
+def analyze_idea(title, command_runner=default_command_runner):
     """Deep analysis: search knowledge base and generate feasibility assessment."""
     # First find the idea file
     idea_file = None
@@ -222,44 +346,21 @@ def analyze_idea(title):
 
     if not idea_file:
         # Treat as ad-hoc query
-        related = search_related_knowledge(title)
+        related = search_related_knowledge(title, command_runner=command_runner)
         return {
             'title': title,
             'found': False,
             'related_knowledge': related,
+            'related_details': build_related_details(related, command_runner=command_runner),
             'message': '灵感笔记未找到，以下是知识库中的相关内容',
         }
 
     with open(idea_file, 'r', encoding='utf-8') as f:
         idea_content = f.read()
 
-    related = search_related_knowledge(title)
+    related = search_related_knowledge(title, command_runner=command_runner)
 
-    # Read related articles for context
-    related_details = []
-    read_later_dir = os.path.join(VAULT, '稍后阅读')
-    for rtitle in related[:5]:
-        for root, dirs, files in os.walk(read_later_dir):
-            for fname in files:
-                if fname.replace('.md', '') == rtitle:
-                    fpath = os.path.join(root, fname)
-                    with open(fpath, 'r', encoding='utf-8') as f:
-                        c = f.read(3000)
-                    # Extract summary section
-                    summary = ''
-                    in_summary = False
-                    for line in c.split('\n'):
-                        if '## 摘要' in line:
-                            in_summary = True
-                            continue
-                        if in_summary and line.startswith('## '):
-                            break
-                        if in_summary and line.strip():
-                            summary += line.strip() + ' '
-                    related_details.append({
-                        'title': rtitle,
-                        'summary': summary.strip()[:200],
-                    })
+    related_details = build_related_details(related, command_runner=command_runner)
 
     return {
         'title': title,

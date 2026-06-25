@@ -25,6 +25,12 @@ CREATE TABLE IF NOT EXISTS articles (
   -- 状态
   is_read INTEGER DEFAULT 0,   -- 0=未读, 1=已读
   is_reported INTEGER DEFAULT 0, -- 是否已在报告中输出过
+  gbrain_slug TEXT,              -- 同步到 gbrain 后的页面 slug
+  gbrain_synced_at TEXT,         -- 最近一次成功同步时间
+  gbrain_sync_status TEXT,       -- NULL/''=未同步, synced=成功, failed=失败
+  gbrain_sync_error TEXT,        -- 最近一次同步失败原因
+  long_term_value INTEGER DEFAULT 0, -- 是否值得进入长期脑库
+  gbrain_sync_mode TEXT,         -- manual=人工标记, heuristic=规则筛选
   
   -- 时间戳
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -60,3 +66,4 @@ CREATE INDEX IF NOT EXISTS idx_articles_is_read ON articles(is_read);
 CREATE INDEX IF NOT EXISTS idx_articles_is_reported ON articles(is_reported);
 CREATE INDEX IF NOT EXISTS idx_articles_created_at ON articles(created_at);
 CREATE INDEX IF NOT EXISTS idx_articles_source_type ON articles(source_type);
+CREATE INDEX IF NOT EXISTS idx_articles_gbrain_sync_status ON articles(gbrain_sync_status);

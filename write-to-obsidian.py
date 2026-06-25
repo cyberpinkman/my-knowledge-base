@@ -31,6 +31,9 @@ CATEGORY_MAP = {
 # 视频类型归入视频文件夹
 VIDEO_TYPES = {'youtube', 'bilibili', 'douyin'}
 
+# 文档类型（PDF）归入文档文件夹
+DOC_TYPES = {'pdf'}
+
 
 def sanitize_filename(name):
     """清理文件名中的非法字符"""
@@ -42,6 +45,39 @@ def sanitize_filename(name):
     return name or 'Untitled'
 
 
+def note_has_source(filepath, url):
+    """Return True when an existing note already represents this source URL."""
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            head = f.read(1200)
+    except OSError:
+        return False
+    return f'source: "{url}"' in head or f"source: '{url}'" in head
+
+
+def choose_note_path(folder, safe_title, url, date_str):
+    """Choose an idempotent Obsidian note path for a source URL."""
+    base = os.path.join(folder, f"{safe_title}.md")
+    dated = os.path.join(folder, f"{safe_title} ({date_str}).md")
+
+    for candidate in (base, dated):
+        if os.path.exists(candidate) and note_has_source(candidate, url):
+            return candidate
+
+    if not os.path.exists(base):
+        return base
+
+    if not os.path.exists(dated):
+        return dated
+
+    counter = 2
+    while True:
+        candidate = os.path.join(folder, f"{safe_title} ({date_str}-{counter}).md")
+        if not os.path.exists(candidate):
+            return candidate
+        counter += 1
+
+
 def write_note(title, url, source_type, author='', category='',
                tags='', summary='', content='', key_points=''):
     """Write a note to Obsidian vault."""
@@ -49,6 +85,8 @@ def write_note(title, url, source_type, author='', category='',
     # Determine folder
     if source_type in VIDEO_TYPES:
         folder = os.path.join(VAULT, '稍后阅读', '视频')
+    elif source_type in DOC_TYPES:
+        folder = os.path.join(VAULT, '稍后阅读', '文档')
     else:
         cat_folder = CATEGORY_MAP.get(category, '其他')
         folder = os.path.join(VAULT, '稍后阅读', cat_folder)
@@ -58,12 +96,7 @@ def write_note(title, url, source_type, author='', category='',
     # Build filename
     date_str = datetime.now().strftime('%Y-%m-%d')
     safe_title = sanitize_filename(title)
-    filename = f"{safe_title}.md"
-    filepath = os.path.join(folder, filename)
-    
-    # Handle duplicate
-    if os.path.exists(filepath):
-        filepath = os.path.join(folder, f"{safe_title} ({date_str}).md")
+    filepath = choose_note_path(folder, safe_title, url, date_str)
     
     # Format tags
     tag_list = [t.strip() for t in tags.split(',') if t.strip()]
