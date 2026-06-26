@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end read-later processing pipeline.
+"""End-to-end my-knowledge-base processing pipeline.
 
 The shell entrypoint owns input normalization and de-duplication. This module
 owns the article lifecycle after a row exists in SQLite:
@@ -26,8 +26,20 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 
-WORKSPACE = Path(os.path.expanduser("~/.openclaw/workspace/read-later"))
-DEFAULT_DB = WORKSPACE / "articles.db"
+PROJECT_NAME = "my-knowledge-base"
+PROJECT_ENV_PREFIX = "MY_KNOWLEDGE_BASE"
+LEGACY_ENV_PREFIX = "READ" + "_LATER"
+WORKSPACE = Path(__file__).resolve().parent
+
+
+def env_get(suffix: str, default: object = None) -> str | object:
+    current = os.environ.get(f"{PROJECT_ENV_PREFIX}_{suffix}")
+    if current is not None:
+        return current
+    return os.environ.get(f"{LEGACY_ENV_PREFIX}_{suffix}", default)
+
+
+DEFAULT_DB = Path(str(env_get("DB", WORKSPACE / "articles.db"))).expanduser()
 DEFAULT_VAULT = Path(os.environ.get("OBSIDIAN_VAULT_PATH", "~/Documents/我的知识库")).expanduser()
 MINIMAX_DEFAULT_BASE_URL = "https://api.minimaxi.com/v1"
 MINIMAX_DEFAULT_MODEL = "MiniMax-M3"
@@ -167,8 +179,9 @@ def fetch_article_content(article: sqlite3.Row) -> FetchResult:
 
 
 def fetch_video_content(url: str) -> FetchResult:
-    with tempfile.TemporaryDirectory(prefix="read-later-video-") as outdir:
-        result = run_json_command([sys.executable, str(WORKSPACE / "fetch-video.py"), url, outdir], timeout=240)
+    with tempfile.TemporaryDirectory(prefix="my-knowledge-base-video-") as outdir:
+        timeout = int(str(env_get("VIDEO_FETCH_TIMEOUT", "1800")))
+        result = run_json_command([sys.executable, str(WORKSPACE / "fetch-video.py"), url, outdir], timeout=timeout)
     if isinstance(result, FetchResult):
         return result
     return fetch_result_from_video_payload(url, result)
@@ -203,10 +216,10 @@ def fetch_pdf_content(url: str) -> FetchResult:
 
 
 def fetch_web_content(url: str) -> FetchResult:
-    screenshot_path = tempfile.NamedTemporaryFile(prefix="read-later-page-", suffix=".png", delete=False)
+    screenshot_path = tempfile.NamedTemporaryFile(prefix="my-knowledge-base-page-", suffix=".png", delete=False)
     screenshot_path.close()
     screenshot_file = screenshot_path.name
-    keep_screenshot = os.environ.get("READ_LATER_KEEP_SCREENSHOTS") == "1"
+    keep_screenshot = env_get("KEEP_SCREENSHOTS") == "1"
     argv = ["node", str(WORKSPACE / "fetch-screenshot.js"), url, screenshot_file]
     try:
         completed = subprocess.run(
@@ -377,12 +390,12 @@ def analyze_content_with_configured_llm(
     source_type: str,
     raw_metadata: Mapping[str, object],
 ) -> AnalysisResult | None:
-    if os.environ.get("READ_LATER_DISABLE_LLM") == "1":
+    if env_get("DISABLE_LLM") == "1":
         return None
-    command = os.environ.get("READ_LATER_LLM_COMMAND")
+    command = env_get("LLM_COMMAND")
     if command:
-        return analyze_with_command(command, title, content, source_type, raw_metadata)
-    provider = os.environ.get("READ_LATER_LLM_PROVIDER", "").strip().lower()
+        return analyze_with_command(str(command), title, content, source_type, raw_metadata)
+    provider = str(env_get("LLM_PROVIDER", "")).strip().lower()
     if provider == "minimax" or (provider == "" and resolve_minimax_api_key()[0]):
         result = analyze_with_minimax(title, content, source_type, raw_metadata)
         if result:
@@ -406,6 +419,7 @@ def analysis_input(title: str, content: str, source_type: str, raw_metadata: Map
             "inferences": "3-8 bullet strings of reasoning clearly derived from source_facts",
             "external_context": "optional external background; mark it as unverified or return []",
             "claims_to_verify": "claims/questions that require checking original sources or outside evidence",
+            "note_content": "optional; normally omit it because the system will build note sections from source_facts/inferences",
         },
     }
 
@@ -425,7 +439,7 @@ def analyze_with_command(
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=int(os.environ.get("READ_LATER_LLM_TIMEOUT", "120")),
+            timeout=int(str(env_get("LLM_TIMEOUT", "120"))),
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -445,13 +459,13 @@ def analyze_with_openai(
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return None
-    model = os.environ.get("READ_LATER_LLM_MODEL", "gpt-5.4-mini")
-    url = os.environ.get("READ_LATER_LLM_BASE_URL", "https://api.openai.com/v1/responses")
+    model = str(env_get("LLM_MODEL", "gpt-5.4-mini"))
+    url = str(env_get("LLM_BASE_URL", "https://api.openai.com/v1/responses"))
     payload = {
         "model": model,
-        "reasoning": {"effort": os.environ.get("READ_LATER_LLM_REASONING", "low")},
+        "reasoning": {"effort": str(env_get("LLM_REASONING", "low"))},
         "text": {"verbosity": "low"},
-        "max_output_tokens": int(os.environ.get("READ_LATER_LLM_MAX_OUTPUT_TOKENS", "2200")),
+        "max_output_tokens": int(str(env_get("LLM_MAX_OUTPUT_TOKENS", "5000"))),
         "input": [
             {
                 "role": "system",
@@ -477,7 +491,7 @@ def analyze_with_openai(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=int(os.environ.get("READ_LATER_LLM_TIMEOUT", "120"))) as response:
+        with urllib.request.urlopen(request, timeout=int(str(env_get("LLM_TIMEOUT", "120")))) as response:
             response_payload = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
         return None
@@ -495,8 +509,8 @@ def analyze_with_minimax(
     api_key, _api_key_env = resolve_minimax_api_key()
     if not api_key:
         return None
-    model = os.environ.get("READ_LATER_MINIMAX_MODEL") or os.environ.get("READ_LATER_LLM_MODEL") or MINIMAX_DEFAULT_MODEL
-    base_url = (os.environ.get("READ_LATER_MINIMAX_BASE_URL") or MINIMAX_DEFAULT_BASE_URL).rstrip("/")
+    model = str(env_get("MINIMAX_MODEL") or env_get("LLM_MODEL") or MINIMAX_DEFAULT_MODEL)
+    base_url = str(env_get("MINIMAX_BASE_URL") or MINIMAX_DEFAULT_BASE_URL).rstrip("/")
     url = f"{base_url}/chat/completions"
     schema = analysis_json_schema()
     payload = {
@@ -520,14 +534,14 @@ def analyze_with_minimax(
                 "type": "function",
                 "function": {
                     "name": MINIMAX_STRUCTURED_TOOL_NAME,
-                    "description": "Return the final structured JSON object for the read-later knowledge workflow.",
+                    "description": "Return the final structured JSON object for the my-knowledge-base workflow.",
                     "parameters": schema,
                 },
             }
         ],
         "tool_choice": {"type": "function", "function": {"name": MINIMAX_STRUCTURED_TOOL_NAME}},
         "thinking": {"type": "disabled"},
-        "max_tokens": int(os.environ.get("READ_LATER_LLM_MAX_OUTPUT_TOKENS", "2200")),
+        "max_tokens": int(str(env_get("LLM_MAX_OUTPUT_TOKENS", "5000"))),
     }
     if str(model).strip().lower() in {"minimax-m3", "minimax/minimax-m3"}:
         payload["reasoning_split"] = True
@@ -541,7 +555,7 @@ def analyze_with_minimax(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=int(os.environ.get("READ_LATER_LLM_TIMEOUT", "120"))) as response:
+        with urllib.request.urlopen(request, timeout=int(str(env_get("LLM_TIMEOUT", "120")))) as response:
             response_payload = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
         return None
@@ -550,7 +564,7 @@ def analyze_with_minimax(
 
 
 def resolve_minimax_api_key() -> tuple[str, str]:
-    api_key_env = os.environ.get("READ_LATER_MINIMAX_API_KEY_ENV", MINIMAX_DEFAULT_API_KEY_ENV)
+    api_key_env = str(env_get("MINIMAX_API_KEY_ENV", MINIMAX_DEFAULT_API_KEY_ENV))
     candidates = [api_key_env]
     if api_key_env == MINIMAX_DEFAULT_API_KEY_ENV:
         candidates.extend(["MINIMAX_CN_API_KEY", "MINIMAX_SUBSCRIPTION_KEY"])
@@ -984,7 +998,7 @@ def _clean(value: object) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Process one read-later article end-to-end")
+    parser = argparse.ArgumentParser(description="Process one my-knowledge-base article end-to-end")
     parser.add_argument("--id", type=int, required=True, help="articles.id to process")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="Path to articles.db")
     parser.add_argument("--vault", default=str(DEFAULT_VAULT), help="Obsidian vault path")

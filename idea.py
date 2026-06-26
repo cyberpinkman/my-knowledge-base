@@ -158,16 +158,16 @@ def search_vault_related_knowledge(query):
         return []
 
     related = []
-    read_later_dir = os.path.join(VAULT, '稍后阅读')
+    articles_dir = os.path.join(VAULT, '稍后阅读')
 
     # Extract keywords from query (simple approach: split and filter short words)
     keywords = [w for w in re.split(r'[\s,，、；;]+', query) if len(w) >= 2]
 
-    if not os.path.exists(read_later_dir):
+    if not os.path.exists(articles_dir):
         return []
 
     # Walk through all knowledge articles
-    for root, dirs, files in os.walk(read_later_dir):
+    for root, dirs, files in os.walk(articles_dir):
         for fname in files:
             if not fname.endswith('.md'):
                 continue
@@ -239,7 +239,7 @@ def get_gbrain_page_summary(slug, command_runner=default_command_runner,
 def build_related_details(related, command_runner=default_command_runner):
     """Build summary details for related gbrain slugs or vault note titles."""
     related_details = []
-    read_later_dir = os.path.join(VAULT, '稍后阅读')
+    articles_dir = os.path.join(VAULT, '稍后阅读')
 
     for item in related[:5]:
         if looks_like_gbrain_slug(item):
@@ -251,9 +251,9 @@ def build_related_details(related, command_runner=default_command_runner):
             })
             continue
 
-        if not os.path.exists(read_later_dir):
+        if not os.path.exists(articles_dir):
             continue
-        for root, dirs, files in os.walk(read_later_dir):
+        for root, dirs, files in os.walk(articles_dir):
             for fname in files:
                 if fname.replace('.md', '') != item:
                     continue

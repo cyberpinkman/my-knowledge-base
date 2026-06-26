@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-read-later 共享 SQLite helper
+my-knowledge-base 共享 SQLite helper
 替代 bash + sqlite3 命令行拼接,提供安全的参数化查询。
 
 用法:
@@ -19,7 +19,21 @@ import sqlite3
 import sys
 
 
-DB_PATH = os.path.expanduser("~/.openclaw/workspace/read-later/articles.db")
+WORKSPACE = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ENV_PREFIX = "MY_KNOWLEDGE_BASE"
+LEGACY_ENV_PREFIX = "READ" + "_LATER"
+
+
+def env_get(suffix, default=None):
+    current = os.environ.get(f"{PROJECT_ENV_PREFIX}_{suffix}")
+    if current is not None:
+        return current
+    return os.environ.get(f"{LEGACY_ENV_PREFIX}_{suffix}", default)
+
+
+DB_PATH = os.path.expanduser(
+    env_get("DB", os.path.join(WORKSPACE, "articles.db"))
+)
 
 
 def get_conn():

@@ -20,10 +20,25 @@ import sys
 import glob
 import shutil
 from pathlib import Path
+import urllib.request
+
+LEGACY_ENV_PREFIX = 'READ' + '_LATER'
 
 
 def run(cmd, **kwargs):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=kwargs.pop('timeout', 120), **kwargs)
+
+
+def env_get(suffix, default=None):
+    current = os.environ.get(f'MY_KNOWLEDGE_BASE_{suffix}')
+    if current is not None:
+        return current
+    return os.environ.get(f'{LEGACY_ENV_PREFIX}_{suffix}', default)
+
+
+def is_usable_douyin_summary(text):
+    min_chars = int(env_get('DOUYIN_MIN_CHAPTER_SUMMARY_CHARS', '300'))
+    return len((text or '').strip()) >= min_chars
 
 
 def get_video_id(url):
@@ -147,13 +162,54 @@ def download_video(url, outdir):
 
 
 def download_video_playwright(url, outdir):
-    """Legacy hook for direct video downloads.
+    """Download Douyin media found by the Playwright page scraper."""
+    page = fetch_douyin_page_json(url)
+    media_file = download_douyin_media(page, outdir)
+    return media_file if media_file and media_file.endswith('.mp4') else None
 
-    fetch-douyin.js extracts page metadata as JSON; it does not download an mp4.
-    Keep this function as a no-op so callers do not mistake page scraping for
-    video download.
-    """
+
+def download_douyin_media(page_payload, outdir):
+    """Download direct Douyin audio/video URL exposed by aweme detail JSON."""
+    if not page_payload:
+        return None
+
+    audio_url = page_payload.get('audio_url') or ''
+    if audio_url:
+        audio_file = os.path.join(outdir, 'douyin_audio.mp4')
+        if download_url(audio_url, audio_file):
+            return audio_file
+
+    video_url = page_payload.get('video_url') or ''
+    if video_url:
+        video_file = os.path.join(outdir, 'video.mp4')
+        if download_url(video_url, video_file):
+            return video_file
     return None
+
+
+def download_url(url, output_path, min_size=10000):
+    request = urllib.request.Request(
+        url,
+        headers={
+            'User-Agent': (
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ),
+            'Referer': 'https://www.douyin.com/',
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response, open(output_path, 'wb') as out:
+            shutil.copyfileobj(response, out)
+        if os.path.exists(output_path) and os.path.getsize(output_path) > min_size:
+            return True
+    except Exception as e:
+        print(f"[fetch-video] direct media download failed: {e}", file=sys.stderr)
+    try:
+        os.remove(output_path)
+    except OSError:
+        pass
+    return False
 
 
 def fetch_douyin_page_json(url):
@@ -226,6 +282,30 @@ def transcribe_audio(audio_file):
             return text
     except Exception as e:
         print(f"[fetch-video] whisper failed: {e}", file=sys.stderr)
+
+    # Method 3: whisper CLI may be installed even when the current Python cannot import it.
+    cli = shutil.which('whisper')
+    if cli:
+        outdir = os.path.dirname(audio_file)
+        model = env_get('WHISPER_MODEL', 'tiny')
+        timeout = int(env_get('WHISPER_TIMEOUT', '900'))
+        try:
+            run([
+                cli,
+                audio_file,
+                '--model', model,
+                '--language', 'zh',
+                '--output_dir', outdir,
+                '--output_format', 'txt',
+                '--verbose', 'False',
+            ], timeout=timeout)
+            transcript_path = os.path.join(outdir, f"{Path(audio_file).stem}.txt")
+            if os.path.exists(transcript_path):
+                text = Path(transcript_path).read_text(encoding='utf-8', errors='ignore').strip()
+                if text:
+                    return text
+        except Exception as e:
+            print(f"[fetch-video] whisper CLI failed: {e}", file=sys.stderr)
     
     return ''
 
@@ -271,7 +351,7 @@ def main():
         sys.exit(1)
     
     url = sys.argv[1]
-    outdir = sys.argv[2] if len(sys.argv) > 2 else '/tmp/read-later-video'
+    outdir = sys.argv[2] if len(sys.argv) > 2 else '/tmp/my-knowledge-base-video'
     os.makedirs(outdir, exist_ok=True)
     
     # Step 1: Metadata
@@ -293,6 +373,7 @@ def main():
     source = 'none'
     tags = []
     published_date = ''
+    douyin_summary_fallback = ''
 
     # Douyin short links often need fresh cookies for yt-dlp, but the page
     # itself can expose reliable title/author/chapter summary.
@@ -304,10 +385,35 @@ def main():
         duration = douyin_page.get('duration') or duration
         tags = douyin_page.get('tags') or []
         published_date = douyin_page.get('published_date') or ''
-        if douyin_page.get('chapter_summary'):
-            transcript = douyin_page['chapter_summary']
+        chapter_summary = douyin_page.get('chapter_summary') or ''
+        if chapter_summary and is_usable_douyin_summary(chapter_summary):
+            transcript = chapter_summary
             source = 'douyin_page'
             print(f"[fetch-video] 抖音页面摘要获取成功 ({len(transcript)} 字符)", file=sys.stderr)
+        elif chapter_summary:
+            douyin_summary_fallback = chapter_summary
+            print(
+                f"[fetch-video] 抖音页面摘要过短 ({len(chapter_summary)} 字符)，继续尝试音频转写",
+                file=sys.stderr,
+            )
+        elif description and '/note/' in str(douyin_page.get('url') or ''):
+            transcript = description
+            source = 'douyin_note'
+            print(f"[fetch-video] 抖音图文正文获取成功 ({len(transcript)} 字符)", file=sys.stderr)
+
+    # Douyin pages without chapter summaries can still expose a direct audio stream.
+    douyin_media_file = None
+    if not transcript and douyin_page:
+        print("[fetch-video] 尝试下载抖音音频/视频流...", file=sys.stderr)
+        douyin_media_file = download_douyin_media(douyin_page, outdir)
+        if douyin_media_file:
+            print("[fetch-video] 抖音媒体下载成功，Whisper 转录中...", file=sys.stderr)
+            transcript = transcribe_audio(douyin_media_file)
+            if transcript:
+                source = 'whisper'
+                print(f"[fetch-video] Whisper 转录成功 ({len(transcript)} 字符)", file=sys.stderr)
+            else:
+                print("[fetch-video] Whisper 转录失败", file=sys.stderr)
 
     # Step 2: Try subtitles first
     
@@ -363,6 +469,11 @@ def main():
             # Clean up video
             if os.path.exists(video_file):
                 os.remove(video_file)
+
+    if not transcript and douyin_summary_fallback:
+        transcript = douyin_summary_fallback
+        source = 'douyin_page'
+        print(f"[fetch-video] 使用抖音页面摘要兜底 ({len(transcript)} 字符)", file=sys.stderr)
     
     # Step 4: Fallback to metadata
     if not transcript and source == 'none':

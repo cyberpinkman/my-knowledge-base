@@ -9,7 +9,7 @@
 set -euo pipefail
 
 URL="$1"
-OUTDIR="${2:-/tmp/read-later-video}"
+OUTDIR="${2:-/tmp/my-knowledge-base-video}"
 mkdir -p "$OUTDIR"
 
 RESULT_FILE="$OUTDIR/result.json"

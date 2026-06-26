@@ -1,9 +1,9 @@
 {
-  "name": "read-later",
+  "name": "my-knowledge-base",
   "version": "1.0.0",
   "main": "fetch-screenshot.js",
   "scripts": {
-    "test": "python3 -m unittest test_sync_to_gbrain.py test_idea_gbrain.py test_mark.py test_pipeline.py"
+    "test": "python3 -m unittest test_sync_to_gbrain.py test_idea_gbrain.py test_mark.py test_pipeline.py test_fetch_video.py test_repair_obsidian.py"
   },
   "keywords": [],
   "author": "",

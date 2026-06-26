@@ -1,5 +1,5 @@
 #!/bin/bash
-# 智能稍后阅读 - 统一收录入口
+# my-knowledge-base - 统一收录入口
 # 用法:
 #   ./process.sh "https://example.com/article"     # URL 模式
 #   ./process.sh "/path/to/local/file.pdf"         # 本地文件模式 (自动识别 .pdf)
@@ -8,14 +8,28 @@
 #   - URL: detect_source_type → 写入 SQLite → pipeline 抓取/总结/写 Obsidian
 #   - 本地 .pdf 文件: 写入 file:// URL → pipeline 调用 fetch-pdf.py --local
 #   - 同一 URL/file 已存在 → 复用原 ID, 未处理则继续补处理
-#   - READ_LATER_INBOX_ONLY=1 可只收录不处理
+#   - MY_KNOWLEDGE_BASE_INBOX_ONLY=1 可只收录不处理
 set -e
 
-WORKSPACE="$HOME/.openclaw/workspace/read-later"
+WORKSPACE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DB="$WORKSPACE/articles.db"
 LOG="$WORKSPACE/process.log"
 DB_PY="$WORKSPACE/db.py"
 PIPELINE_PY="$WORKSPACE/pipeline.py"
+
+env_value() {
+  local suffix="$1"
+  local current="MY_KNOWLEDGE_BASE_${suffix}"
+  local legacy="READ_""LATER_${suffix}"
+
+  if [[ -n "${!current+x}" ]]; then
+    printf '%s' "${!current}"
+    return
+  fi
+  if [[ -n "${!legacy+x}" ]]; then
+    printf '%s' "${!legacy}"
+  fi
+}
 
 # 初始化数据库 (复用 init_db 逻辑)
 init_db() {
@@ -154,18 +168,18 @@ main() {
     echo "   模式: $input_kind"
   fi
 
-  if [[ "${READ_LATER_INBOX_ONLY:-}" == "1" ]]; then
-    echo "   状态: 待处理（READ_LATER_INBOX_ONLY=1）"
+  if [[ "$(env_value INBOX_ONLY)" == "1" ]]; then
+    echo "   状态: 待处理（MY_KNOWLEDGE_BASE_INBOX_ONLY=1）"
     exit 0
   fi
 
   echo "   状态: 开始抓取、总结并写入 Obsidian..."
 
   local pipeline_args=(python3 "$PIPELINE_PY" --id "$article_id")
-  if [[ "${READ_LATER_SYNC_GBRAIN:-}" == "1" ]]; then
+  if [[ "$(env_value SYNC_GBRAIN)" == "1" ]]; then
     pipeline_args+=(--sync-gbrain)
   fi
-  if [[ "${READ_LATER_FORCE:-}" == "1" ]]; then
+  if [[ "$(env_value FORCE)" == "1" ]]; then
     pipeline_args+=(--force)
   fi
 

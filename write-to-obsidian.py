@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-将稍后阅读文章写入 Obsidian Vault
+将 my-knowledge-base 条目写入 Obsidian Vault
 用法: python3 write-to-obsidian.py --title "标题" --url "链接" --source_type "youtube" \
       --author "作者" --category "tech" --tags "AI,Python" --summary "摘要" --content "正文"
 
@@ -18,6 +18,7 @@ from datetime import datetime
 
 VAULT = os.environ.get('OBSIDIAN_VAULT_PATH', 
                        os.path.expanduser('~/Documents/我的知识库'))
+PROJECT_NAME = 'my-knowledge-base'
 
 CATEGORY_MAP = {
     'tech': '技术',
@@ -155,7 +156,7 @@ status: unread
     if content:
         note += f"\n## 正文\n\n{content}\n"
     
-    note += f"\n---\n*由智能稍后阅读服务自动收录于 {date_str}*\n"
+    note += f"\n---\n*由 {PROJECT_NAME} 自动收录于 {date_str}*\n"
     
     with open(filepath, 'w', encoding='utf-8') as f:
         f.write(note)
@@ -164,7 +165,7 @@ status: unread
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Write read-later article to Obsidian')
+    parser = argparse.ArgumentParser(description='Write my-knowledge-base article to Obsidian')
     parser.add_argument('--title', required=True, help='Article title')
     parser.add_argument('--url', required=True, help='Original URL')
     parser.add_argument('--source-type', default='web', help='Source type')

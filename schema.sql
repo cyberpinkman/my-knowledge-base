@@ -1,5 +1,5 @@
--- 智能稍后阅读数据库结构
--- 路径: ~/.openclaw/workspace/read-later/articles.db
+-- my-knowledge-base 数据库结构
+-- 路径: 仓库目录/articles.db
 
 CREATE TABLE IF NOT EXISTS articles (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

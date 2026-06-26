@@ -1,15 +1,15 @@
 #!/bin/bash
-# 智能稍后阅读 - 报告生成脚本
+# my-knowledge-base - 报告生成脚本
 # 用法: ./report.sh [daily|weekly|unread]
 
 set -e
 
-WORKSPACE="$HOME/.openclaw/workspace/read-later"
+WORKSPACE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DB="$WORKSPACE/articles.db"
 
 # 统计未读文章
 stats() {
-  echo "📊 **稍后阅读统计**"
+  echo "📊 **my-knowledge-base 统计**"
   echo ""
   
   local total=$(sqlite3 "$DB" "SELECT COUNT(*) FROM articles;")

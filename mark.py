@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mark read-later articles for long-term gbrain sync."""
+"""Mark my-knowledge-base articles for long-term gbrain sync."""
 
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ def open_db(db_path: str | Path) -> sqlite3.Connection:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Mark read-later articles for long-term value")
+    parser = argparse.ArgumentParser(description="Mark my-knowledge-base articles for long-term value")
     parser.add_argument("--db", default=str(sync_to_gbrain.DEFAULT_DB), help="Path to articles.db")
     sub = parser.add_subparsers(dest="command", required=True)
 

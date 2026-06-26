@@ -10,6 +10,13 @@ from unittest.mock import patch
 import pipeline
 
 
+LEGACY_ENV_PREFIX = "READ" + "_LATER"
+
+
+def legacy_env(suffix):
+    return f"{LEGACY_ENV_PREFIX}_{suffix}"
+
+
 def make_db():
     tmp = tempfile.TemporaryDirectory()
     db_path = Path(tmp.name) / "articles.db"
@@ -20,13 +27,27 @@ def make_db():
     return tmp, db_path, conn
 
 
-class ReadLaterPipelineTest(unittest.TestCase):
+class MyKnowledgeBasePipelineTest(unittest.TestCase):
     def setUp(self):
-        self._old_disable_llm = os.environ.get("READ_LATER_DISABLE_LLM")
-        os.environ["READ_LATER_DISABLE_LLM"] = "1"
+        self._old_disable_llm = os.environ.get("MY_KNOWLEDGE_BASE_DISABLE_LLM")
+        os.environ["MY_KNOWLEDGE_BASE_DISABLE_LLM"] = "1"
 
     def tearDown(self):
-        _restore_env("READ_LATER_DISABLE_LLM", self._old_disable_llm)
+        _restore_env("MY_KNOWLEDGE_BASE_DISABLE_LLM", self._old_disable_llm)
+
+    def test_env_get_supports_legacy_fallback_with_new_prefix_precedence(self):
+        new_name = "MY_KNOWLEDGE_BASE_LLM_PROVIDER"
+        legacy_name = legacy_env("LLM_PROVIDER")
+        old_new = os.environ.pop(new_name, None)
+        old_legacy = os.environ.get(legacy_name)
+        self.addCleanup(lambda: _restore_env(new_name, old_new))
+        self.addCleanup(lambda: _restore_env(legacy_name, old_legacy))
+
+        os.environ[legacy_name] = "minimax"
+        self.assertEqual(pipeline.env_get("LLM_PROVIDER"), "minimax")
+
+        os.environ[new_name] = "openai"
+        self.assertEqual(pipeline.env_get("LLM_PROVIDER"), "openai")
 
     def test_process_article_updates_database_and_writes_obsidian_note(self):
         tmp, db_path, conn = make_db()
@@ -74,6 +95,8 @@ class ReadLaterPipelineTest(unittest.TestCase):
         self.assertIn("# Agent Learning Workflow", note)
         self.assertIn("## 摘要", note)
         self.assertIn("## 正文", note)
+        self.assertIn("*由 my-knowledge-base 自动收录于", note)
+        self.assertNotIn("智能" + "稍后阅读", note)
 
     def test_process_article_records_fetch_failure_and_skips_obsidian(self):
         tmp, db_path, conn = make_db()
@@ -272,11 +295,13 @@ class ReadLaterPipelineTest(unittest.TestCase):
             "}, ensure_ascii=False))\n",
             encoding="utf-8",
         )
-        old_command = os.environ.get("READ_LATER_LLM_COMMAND")
-        old_disable = os.environ.pop("READ_LATER_DISABLE_LLM", None)
-        os.environ["READ_LATER_LLM_COMMAND"] = f"python3 {command_path}"
-        self.addCleanup(lambda: _restore_env("READ_LATER_LLM_COMMAND", old_command))
-        self.addCleanup(lambda: _restore_env("READ_LATER_DISABLE_LLM", old_disable))
+        old_command = os.environ.get("MY_KNOWLEDGE_BASE_LLM_COMMAND")
+        old_disable = os.environ.pop("MY_KNOWLEDGE_BASE_DISABLE_LLM", None)
+        old_legacy_disable = os.environ.pop(legacy_env("DISABLE_LLM"), None)
+        os.environ["MY_KNOWLEDGE_BASE_LLM_COMMAND"] = f"python3 {command_path}"
+        self.addCleanup(lambda: _restore_env("MY_KNOWLEDGE_BASE_LLM_COMMAND", old_command))
+        self.addCleanup(lambda: _restore_env("MY_KNOWLEDGE_BASE_DISABLE_LLM", old_disable))
+        self.addCleanup(lambda: _restore_env(legacy_env("DISABLE_LLM"), old_legacy_disable))
 
         result = pipeline.analyze_content_with_configured_llm(
             "Test Title",
@@ -338,10 +363,12 @@ class ReadLaterPipelineTest(unittest.TestCase):
 
         env_patch = {
             "MINIMAX_CN_API_KEY": "test-key",
-            "READ_LATER_LLM_PROVIDER": "minimax",
+            "MY_KNOWLEDGE_BASE_LLM_PROVIDER": "minimax",
         }
+        old_legacy_disable = os.environ.pop(legacy_env("DISABLE_LLM"), None)
+        self.addCleanup(lambda: _restore_env(legacy_env("DISABLE_LLM"), old_legacy_disable))
         with patch.dict(os.environ, env_patch, clear=False), patch("pipeline.urllib.request.urlopen", fake_urlopen):
-            os.environ.pop("READ_LATER_DISABLE_LLM", None)
+            os.environ.pop("MY_KNOWLEDGE_BASE_DISABLE_LLM", None)
             result = pipeline.analyze_content_with_configured_llm(
                 "Test Title",
                 "raw content",
@@ -395,8 +422,10 @@ class ReadLaterPipelineTest(unittest.TestCase):
         self.assertIn("node missing", result.error)
 
     def test_fetch_web_content_removes_temp_screenshot_unless_debug_retention_enabled(self):
-        old_keep = os.environ.pop("READ_LATER_KEEP_SCREENSHOTS", None)
-        self.addCleanup(lambda: _restore_env("READ_LATER_KEEP_SCREENSHOTS", old_keep))
+        old_keep = os.environ.pop("MY_KNOWLEDGE_BASE_KEEP_SCREENSHOTS", None)
+        old_legacy_keep = os.environ.pop(legacy_env("KEEP_SCREENSHOTS"), None)
+        self.addCleanup(lambda: _restore_env("MY_KNOWLEDGE_BASE_KEEP_SCREENSHOTS", old_keep))
+        self.addCleanup(lambda: _restore_env(legacy_env("KEEP_SCREENSHOTS"), old_legacy_keep))
         seen_paths = []
 
         def fake_run(argv, **kwargs):
@@ -420,7 +449,7 @@ class ReadLaterPipelineTest(unittest.TestCase):
         self.assertNotIn("screenshot", result.raw_metadata or {})
         self.assertFalse(seen_paths[0].exists())
 
-        os.environ["READ_LATER_KEEP_SCREENSHOTS"] = "1"
+        os.environ["MY_KNOWLEDGE_BASE_KEEP_SCREENSHOTS"] = "1"
         with patch("pipeline.subprocess.run", fake_run):
             retained = pipeline.fetch_web_content("https://example.com/article")
 

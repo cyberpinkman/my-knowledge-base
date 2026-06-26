@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Sync selected read-later articles into gbrain as long-term memory pages.
+Sync selected my-knowledge-base articles into gbrain as long-term memory pages.
 
 Default behavior is intentionally conservative: only articles with summaries in
 high-value categories are synced, and the sync is one-way into gbrain.
@@ -21,8 +21,20 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 
-WORKSPACE = Path(os.path.expanduser("~/.openclaw/workspace/read-later"))
-DEFAULT_DB = WORKSPACE / "articles.db"
+PROJECT_NAME = "my-knowledge-base"
+PROJECT_ENV_PREFIX = "MY_KNOWLEDGE_BASE"
+LEGACY_ENV_PREFIX = "READ" + "_LATER"
+WORKSPACE = Path(__file__).resolve().parent
+
+
+def env_get(suffix: str, default: object = None) -> str | object:
+    current = os.environ.get(f"{PROJECT_ENV_PREFIX}_{suffix}")
+    if current is not None:
+        return current
+    return os.environ.get(f"{LEGACY_ENV_PREFIX}_{suffix}", default)
+
+
+DEFAULT_DB = Path(str(env_get("DB", WORKSPACE / "articles.db"))).expanduser()
 DEFAULT_CATEGORIES = ("tech", "business", "design")
 
 
@@ -120,6 +132,33 @@ def select_eligible_articles(
     return list(conn.execute(sql, params))
 
 
+def select_synced_articles(
+    conn: sqlite3.Connection,
+    limit: int | None = None,
+    article_id: int | None = None,
+) -> list[sqlite3.Row]:
+    filters = [
+        "gbrain_slug IS NOT NULL",
+        "TRIM(gbrain_slug) != ''",
+        "gbrain_sync_status = 'synced'",
+    ]
+    params: list[object] = []
+    if article_id is not None:
+        filters.append("id = ?")
+        params.append(int(article_id))
+
+    sql = f"""
+        SELECT *
+        FROM articles
+        WHERE {' AND '.join(filters)}
+        ORDER BY gbrain_synced_at ASC, id ASC
+    """
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    return list(conn.execute(sql, params))
+
+
 def make_slug(article: sqlite3.Row) -> str:
     article_id = int(article["id"])
     source_type = _slug_token(article["source_type"] or "web")
@@ -153,8 +192,8 @@ def yaml_quote(value: object) -> str:
 
 
 def build_markdown(article: sqlite3.Row, slug: str) -> str:
-    title = article["title"] or article["url"] or f"Read-later article {article['id']}"
-    tags = ["read-later", *(parse_tags(article["tags"]))]
+    title = article["title"] or article["url"] or f"{PROJECT_NAME} article {article['id']}"
+    tags = [PROJECT_NAME, *(parse_tags(article["tags"]))]
     tag_yaml = "[" + ", ".join(yaml_quote(tag) for tag in tags) + "]"
     frontmatter = [
         "---",
@@ -166,7 +205,7 @@ def build_markdown(article: sqlite3.Row, slug: str) -> str:
         f"category: {yaml_quote(article['category'] or '')}",
         f"author: {yaml_quote(article['author'] or '')}",
         f"published_date: {yaml_quote(article['published_date'] or '')}",
-        f"read_later_id: {article['id']}",
+        f"knowledge_base_id: {article['id']}",
         f"tags: {tag_yaml}",
         "---",
         "",
@@ -278,12 +317,51 @@ def sync_articles(
         conn.close()
 
 
+def migrate_synced_metadata(
+    db_path: Path | str = DEFAULT_DB,
+    limit: int | None = None,
+    dry_run: bool = False,
+    gbrain_command: str = "gbrain",
+    command_runner: Callable[[list[str], str], CommandResult] = default_command_runner,
+    verbose: bool = True,
+    article_id: int | None = None,
+) -> SyncResult:
+    conn = open_db(db_path)
+    try:
+        ensure_schema(conn)
+        articles = select_synced_articles(conn, limit=limit, article_id=article_id)
+        synced = failed = skipped = 0
+        for article in articles:
+            slug = article["gbrain_slug"] or make_slug(article)
+            markdown = build_markdown(article, slug)
+            if dry_run:
+                if verbose:
+                    print(f"[dry-run] would rewrite metadata for article {article['id']} -> {slug}")
+                skipped += 1
+                continue
+            result = command_runner([gbrain_command, "put", slug], markdown)
+            if result.returncode == 0:
+                mark_synced(conn, int(article["id"]), slug)
+                synced += 1
+                if verbose:
+                    print(f"[migrated] article {article['id']} -> {slug}")
+            else:
+                error = (result.stderr or result.stdout or "gbrain put failed").strip()
+                mark_failed(conn, int(article["id"]), slug, error)
+                failed += 1
+                if verbose:
+                    print(f"[failed] article {article['id']} -> {slug}: {error}", file=sys.stderr)
+        return SyncResult(scanned=len(articles), synced=synced, failed=failed, skipped=skipped)
+    finally:
+        conn.close()
+
+
 def parse_categories(value: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Sync read-later articles into gbrain")
+    parser = argparse.ArgumentParser(description="Sync my-knowledge-base articles into gbrain")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="Path to articles.db")
     parser.add_argument(
         "--categories",
@@ -295,19 +373,33 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--retry-failed", action="store_true", help="Retry articles previously marked failed")
     parser.add_argument("--only-marked", action="store_true", help="Only sync articles marked as long-term value")
     parser.add_argument("--article-id", type=int, default=None, help="Sync one specific articles.id if eligible")
+    parser.add_argument(
+        "--migrate-synced-metadata",
+        action="store_true",
+        help="Rewrite already-synced gbrain pages with current frontmatter and tags",
+    )
     parser.add_argument("--gbrain-command", default="gbrain", help="gbrain executable path")
     args = parser.parse_args(argv)
 
-    result = sync_articles(
-        db_path=args.db,
-        categories=parse_categories(args.categories),
-        limit=args.limit,
-        dry_run=args.dry_run,
-        retry_failed=args.retry_failed,
-        only_marked=args.only_marked,
-        article_id=args.article_id,
-        gbrain_command=args.gbrain_command,
-    )
+    if args.migrate_synced_metadata:
+        result = migrate_synced_metadata(
+            db_path=args.db,
+            limit=args.limit,
+            dry_run=args.dry_run,
+            article_id=args.article_id,
+            gbrain_command=args.gbrain_command,
+        )
+    else:
+        result = sync_articles(
+            db_path=args.db,
+            categories=parse_categories(args.categories),
+            limit=args.limit,
+            dry_run=args.dry_run,
+            retry_failed=args.retry_failed,
+            only_marked=args.only_marked,
+            article_id=args.article_id,
+            gbrain_command=args.gbrain_command,
+        )
     print(
         f"scanned={result.scanned} synced={result.synced} "
         f"failed={result.failed} skipped={result.skipped}"

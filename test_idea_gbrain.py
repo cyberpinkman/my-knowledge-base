@@ -41,9 +41,9 @@ warning: ignored line
             old_vault = idea.VAULT
             try:
                 idea.VAULT = tmp
-                read_later = Path(tmp) / "稍后阅读" / "技术"
-                read_later.mkdir(parents=True)
-                (read_later / "Agent组织方式.md").write_text(
+                articles = Path(tmp) / "稍后阅读" / "技术"
+                articles.mkdir(parents=True)
+                (articles / "Agent组织方式.md").write_text(
                     "# Agent组织方式\n\nAgent Team 可观测 回滚", encoding="utf-8"
                 )
 

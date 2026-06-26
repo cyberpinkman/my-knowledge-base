@@ -19,6 +19,68 @@ if (!URL) {
   process.exit(1);
 }
 
+function collectUrls(obj, out = []) {
+  if (!obj || typeof obj !== 'object') return out;
+  if (Array.isArray(obj)) {
+    obj.forEach(item => collectUrls(item, out));
+    return out;
+  }
+  Object.values(obj).forEach(value => {
+    if (typeof value === 'string' && /^https?:\/\//.test(value)) {
+      out.push(value);
+    } else if (value && typeof value === 'object') {
+      collectUrls(value, out);
+    }
+  });
+  return out;
+}
+
+function extractMediaUrls(awemeDetail) {
+  const urls = collectUrls(awemeDetail?.video || {});
+  const audioUrl = urls.find(url => url.includes('media-audio') || url.includes('/audio/')) || '';
+  const videoUrl = urls.find(url =>
+    url.includes('mime_type=video_mp4') &&
+    !url.includes('/play/dash/') &&
+    !url.includes('media-audio')
+  ) || '';
+  return { audioUrl, videoUrl };
+}
+
+function extractNoteFromText(bodyText, author) {
+  const stopPattern = /^(?:@|评论\s*\d*|查看更多评论|相关推荐|去抖音|说点什么|打开抖音|滑动去抖音|全部评论)/;
+  const lines = String(bodyText || '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean);
+  const candidates = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    if (author && lines[i] !== author) continue;
+    const chunk = [];
+    for (const line of lines.slice(i + 1)) {
+      if (stopPattern.test(line) || /^\d{4}[-/年]\d{1,2}[-/月]\d{1,2}/.test(line)) break;
+      if (/^\d+\+?$/.test(line)) continue;
+      if (/^打开抖音/.test(line)) continue;
+      chunk.push(line);
+    }
+    const text = chunk.join('\n').trim();
+    if (text.length > 40) candidates.push(text);
+  }
+
+  const fallback = lines
+    .slice(lines.findIndex(line => /Vibe Coding|Harness|Skill|AI|vibecoding/i.test(line)))
+    .filter(line => !stopPattern.test(line))
+    .join('\n')
+    .trim();
+  const text = candidates.sort((a, b) => b.length - a.length)[0] || fallback;
+  if (!text) return { title: '', description: '', tags: [] };
+
+  const contentLines = text.split('\n').map(line => line.trim()).filter(Boolean);
+  const title = contentLines[0] || '';
+  const tags = [...new Set((text.match(/#[^\s#]+/g) || []).map(tag => tag.replace(/^#/, '')))];
+  return { title, description: text, tags };
+}
+
 (async () => {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
@@ -26,6 +88,17 @@ if (!URL) {
     locale: 'zh-CN',
   });
   const page = await context.newPage();
+  let awemeDetail = null;
+
+  page.on('response', async response => {
+    if (!response.url().includes('/aweme/v1/web/aweme/detail/')) return;
+    try {
+      const payload = await response.json();
+      awemeDetail = payload.aweme_detail || payload.aweme_details?.[0] || awemeDetail;
+    } catch {
+      // Some duplicate detail responses stream empty bodies; keep the last good one.
+    }
+  });
 
   try {
     console.error(`[douyin] 正在访问: ${URL}`);
@@ -45,6 +118,66 @@ if (!URL) {
 
     // 用 console 注入提取，只取可靠数据
     const data = await page.evaluate(() => {
+      function extractNoteFromPageText(bodyText, author, preferredTitle) {
+        const stopPattern = /^(?:@|展开|发布时间|评论\s*\d*|查看更多评论|相关推荐|去抖音|说点什么|打开抖音|滑动去抖音|全部评论)/;
+        const lines = String(bodyText || '')
+          .split('\n')
+          .map(line => line.trim())
+          .filter(Boolean);
+        const candidates = [];
+        const titleTokens = String(preferredTitle || '')
+          .replace(/\s*-\s*抖音$/, '')
+          .split(/[｜|\s]/)
+          .map(token => token.trim())
+          .filter(token => token.length >= 4);
+
+        for (let i = 0; i < lines.length; i++) {
+          if (author && lines[i] !== author) continue;
+          const chunk = [];
+          for (const line of lines.slice(i + 1)) {
+            if (stopPattern.test(line) || /^\d{4}[-/年]\d{1,2}[-/月]\d{1,2}/.test(line)) break;
+            if (/^\d+\+?$/.test(line)) continue;
+            if (/^打开抖音/.test(line)) continue;
+            chunk.push(line);
+          }
+          const text = chunk.join('\n').trim();
+          if (text.length > 40) candidates.push(text);
+        }
+
+        const firstRelevant = lines.findIndex(line =>
+          titleTokens.some(token => line.includes(token)) || /Vibe Coding|Harness starter/i.test(line)
+        );
+        const fallback = firstRelevant >= 0
+          ? lines.slice(firstRelevant).filter(line => !stopPattern.test(line)).join('\n').trim()
+          : '';
+        const score = text => {
+          const firstLine = text.split('\n').map(line => line.trim()).filter(Boolean)[0] || '';
+          let value = Math.min(text.length, 1200);
+          if (/^\d{1,2}:\d{2}$/.test(firstLine)) value -= 5000;
+          for (const token of titleTokens) {
+            if (firstLine.includes(token)) value += 5000;
+            if (text.includes(token)) value += 2000;
+          }
+          if (/Vibe Coding|Harness starter/i.test(firstLine)) value += 5000;
+          if (/Vibe Coding|Harness starter/i.test(text)) value += 2000;
+          return value;
+        };
+        const text = candidates.sort((a, b) => score(b) - score(a))[0] || fallback;
+        if (!text) return { title: '', description: '', tags: [] };
+
+        let contentLines = text.split('\n').map(line => line.trim()).filter(Boolean);
+        const startAt = contentLines.findIndex(line =>
+          titleTokens.some(token => line.includes(token)) || /Vibe Coding|Harness starter/i.test(line)
+        );
+        if (startAt > 0) contentLines = contentLines.slice(startAt);
+        const firstLine = contentLines[0] || '';
+        const title = firstLine.length > 80
+          ? (firstLine.match(/^.{1,80}?[。！？!?]/)?.[0] || firstLine.slice(0, 80)).trim()
+          : firstLine;
+        const tags = [...new Set((text.match(/#[^\s#]+/g) || []).map(tag => tag.replace(/^#/, '')))];
+        return { title, description: contentLines.join('\n'), tags };
+      }
+
       const result = {
         title: '',
         author: '',
@@ -148,18 +281,36 @@ if (!URL) {
         }
       }
 
+      const isNotePage = location.pathname.includes('/note/') || location.pathname.includes('/share/note/');
+      if (isNotePage) {
+        const note = extractNoteFromPageText(bodyText, result.author, document.title);
+        if (!result.title && note.title) result.title = note.title;
+        if ((!result.description || result.description === result.title) && note.description) {
+          result.description = note.description;
+        }
+        if (!result.tags.length && note.tags.length) result.tags = note.tags;
+      }
+
       return result;
     });
+
+    const mediaUrls = extractMediaUrls(awemeDetail);
+    const durationMs = awemeDetail?.video?.duration || 0;
+    const durationFromDetail = durationMs
+      ? `${Math.floor(durationMs / 60000)}:${String(Math.floor((durationMs % 60000) / 1000)).padStart(2, '0')}`
+      : '';
 
     const output = {
       title: data.title,
       author: data.author,
       description: data.description,
-      duration: data.duration,
+      duration: data.duration || durationFromDetail,
       chapter_summary: data.chapter_summary,
       stats: data.stats,
       tags: data.tags,
       published_date: data.published_date,
+      audio_url: mediaUrls.audioUrl,
+      video_url: mediaUrls.videoUrl,
       video_id: videoId,
       url: finalUrl,
       fetched_at: new Date().toISOString(),

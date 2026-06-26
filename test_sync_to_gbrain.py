@@ -6,6 +6,10 @@ from pathlib import Path
 import sync_to_gbrain
 
 
+LEGACY_PROJECT_LABEL = "read" + "-later"
+LEGACY_ID_FIELD = "read" + "_later_id"
+
+
 def make_db():
     tmp = tempfile.TemporaryDirectory()
     db_path = Path(tmp.name) / "articles.db"
@@ -161,6 +165,10 @@ class SyncToGbrainTest(unittest.TestCase):
         self.assertIn('source_url: "https://example.com/ai-agents"', calls[0][1])
         self.assertIn("## Summary\n\nA concise summary.", calls[0][1])
         self.assertIn("## Original Content\n\nFull original body.", calls[0][1])
+        self.assertIn('"my-knowledge-base"', calls[0][1])
+        self.assertIn("knowledge_base_id: 1", calls[0][1])
+        self.assertNotIn(LEGACY_PROJECT_LABEL, calls[0][1])
+        self.assertNotIn(LEGACY_ID_FIELD, calls[0][1])
 
         row = conn.execute(
             "SELECT gbrain_slug, gbrain_sync_status, gbrain_sync_error FROM articles WHERE id = 1"
@@ -225,6 +233,71 @@ class SyncToGbrainTest(unittest.TestCase):
             "SELECT id, gbrain_sync_status FROM articles ORDER BY id"
         ).fetchall()
         self.assertEqual([(row["id"], row["gbrain_sync_status"]) for row in rows], [(1, None), (2, "synced")])
+
+    def test_migrate_synced_metadata_rewrites_existing_gbrain_page(self):
+        tmp, db_path, conn = make_db()
+        self.addCleanup(tmp.cleanup)
+        sync_to_gbrain.ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO articles (
+              url, source_type, title, original_content, summary, category, tags,
+              gbrain_slug, gbrain_sync_status, gbrain_synced_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "https://example.com/already-synced",
+                "web",
+                "Already Synced",
+                "Existing body.",
+                "Existing summary.",
+                "life",
+                '["learning"]',
+                "media/articles/web-1-existing",
+                "synced",
+                "2026-06-01T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+        calls = []
+
+        def runner(argv, input_text):
+            calls.append((argv, input_text))
+            return sync_to_gbrain.CommandResult(returncode=0, stdout="", stderr="")
+
+        result = sync_to_gbrain.migrate_synced_metadata(
+            db_path=db_path,
+            command_runner=runner,
+            verbose=False,
+        )
+
+        self.assertEqual(result.scanned, 1)
+        self.assertEqual(result.synced, 1)
+        self.assertEqual(calls[0][0], ["gbrain", "put", "media/articles/web-1-existing"])
+        self.assertIn('"my-knowledge-base"', calls[0][1])
+        self.assertIn("knowledge_base_id: 1", calls[0][1])
+        self.assertNotIn(LEGACY_PROJECT_LABEL, calls[0][1])
+        self.assertNotIn(LEGACY_ID_FIELD, calls[0][1])
+
+    def test_build_markdown_fallback_title_uses_project_name(self):
+        tmp, _db_path, conn = make_db()
+        self.addCleanup(tmp.cleanup)
+        sync_to_gbrain.ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO articles (url, source_type, title, summary, category, tags)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("", "web", "", "Summary.", "tech", "[]"),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM articles WHERE id = 1").fetchone()
+
+        markdown = sync_to_gbrain.build_markdown(row, "media/articles/web-1-empty")
+
+        self.assertIn("# my-knowledge-base article 1", markdown)
+        self.assertNotIn(LEGACY_PROJECT_LABEL, markdown)
 
 
 if __name__ == "__main__":
